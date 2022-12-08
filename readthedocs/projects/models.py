@@ -10,13 +10,13 @@ from urllib.parse import urlparse
 import structlog
 from allauth.socialaccount.providers import registry as allauth_registry
 from django.conf import settings
-from django.conf.urls import include
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.fields import GenericRelation
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Prefetch
-from django.urls import re_path, reverse
+from django.urls import include, re_path, reverse
+from django.utils import timezone
 from django.utils.crypto import get_random_string
 from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
@@ -31,6 +31,7 @@ from readthedocs.constants import pattern_opts
 from readthedocs.core.history import ExtraHistoricalRecords
 from readthedocs.core.resolver import resolve, resolve_domain
 from readthedocs.core.utils import slugify
+from readthedocs.domains.querysets import DomainQueryset
 from readthedocs.projects import constants
 from readthedocs.projects.exceptions import ProjectConfigurationError
 from readthedocs.projects.managers import HTMLFileManager
@@ -51,7 +52,13 @@ from readthedocs.search.parsers import GenericParser, MkDocsParser, SphinxParser
 from readthedocs.storage import build_media_storage
 from readthedocs.vcs_support.backends import backend_cls
 
-from .constants import MEDIA_TYPE_EPUB, MEDIA_TYPE_HTMLZIP, MEDIA_TYPE_PDF, MEDIA_TYPES
+from .constants import (
+    DOWNLOADABLE_MEDIA_TYPES,
+    MEDIA_TYPE_EPUB,
+    MEDIA_TYPE_HTMLZIP,
+    MEDIA_TYPE_PDF,
+    MEDIA_TYPES,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -441,7 +448,7 @@ class Project(models.Model):
         help_text=_('This project has been successfully cloned'),
     )
 
-    tags = TaggableManager(blank=True)
+    tags = TaggableManager(blank=True, ordering=["name"])
     history = ExtraHistoricalRecords()
     objects = ProjectQuerySet.as_manager()
 
@@ -458,6 +465,7 @@ class Project(models.Model):
 
     class Meta:
         ordering = ('slug',)
+        verbose_name = _("project")
 
     def __str__(self):
         return self.name
@@ -564,16 +572,22 @@ class Project(models.Model):
         :return: the path to an item in storage
             (can be used with ``storage.url`` to get the URL)
         """
+        if type_ not in MEDIA_TYPES:
+            raise ValueError("Invalid content type.")
+
+        if include_file and type_ not in DOWNLOADABLE_MEDIA_TYPES:
+            raise ValueError("Invalid content type for downloadable file.")
+
         type_dir = type_
         # Add `external/` prefix for external versions
         if version_type == EXTERNAL:
             type_dir = f'{EXTERNAL}/{type_}'
 
-        folder_path = '{}/{}/{}'.format(
-            type_dir,
-            self.slug,
-            version_slug,
-        )
+        # Version slug may come from an unstrusted input,
+        # so we use join to avoid any path traversal.
+        # All other values are already validated.
+        folder_path = build_media_storage.join(f"{type_dir}/{self.slug}", version_slug)
+
         if include_file:
             extension = type_.replace('htmlzip', 'zip')
             return '{}/{}.{}'.format(
@@ -676,7 +690,7 @@ class Project(models.Model):
         """
         from readthedocs.projects.views.public import ProjectDownloadMedia
         from readthedocs.proxito.urls import core_urls
-        from readthedocs.proxito.views.serve import ServeDocs
+        from readthedocs.proxito.views.serve import ServeDocs, ServeStaticFiles
         from readthedocs.proxito.views.utils import proxito_404_page_handler
 
         class ProxitoURLConf:
@@ -700,6 +714,15 @@ class Project(models.Model):
                         **pattern_opts),
                     ProjectDownloadMedia.as_view(same_domain_url=True),
                     name='user_proxied_downloads'
+                ),
+                re_path(
+                    r"{proxied_api_url}static/"
+                    r"(?P<filename>{filename_slug})$".format(
+                        proxied_api_url=re.escape(self.proxied_api_url),
+                        **pattern_opts,
+                    ),
+                    ServeStaticFiles.as_view(),
+                    name="proxito_static_files",
                 ),
             ]
             docs_urls = [
@@ -764,6 +787,9 @@ class Project(models.Model):
 
     @property
     def clean_repo(self):
+        # NOTE: this method is used only when the project is going to be clonned.
+        # It probably makes sense to do a data migrations and force "Import Project"
+        # form to validate it's an HTTPS URL when importing new ones
         if self.repo.startswith('http://github.com'):
             return self.repo.replace('http://github.com', 'https://github.com')
         return self.repo
@@ -790,47 +816,6 @@ class Project(models.Model):
     def artifact_path(self, type_, version=LATEST):
         """The path to the build html docs in the project."""
         return os.path.join(self.doc_path, 'artifacts', version, type_)
-
-    def full_build_path(self, version=LATEST):
-        """The path to the build html docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'html')
-
-    def full_latex_path(self, version=LATEST):
-        """The path to the build LaTeX docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'latex')
-
-    def full_epub_path(self, version=LATEST):
-        """The path to the build epub docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'epub')
-
-    # There is currently no support for building man/dash formats, but we keep
-    # the support there for existing projects. They might have already existing
-    # legacy builds.
-
-    def full_man_path(self, version=LATEST):
-        """The path to the build man docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'man')
-
-    def full_dash_path(self, version=LATEST):
-        """The path to the build dash docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'dash')
-
-    def full_json_path(self, version=LATEST):
-        """The path to the build json docs in the project."""
-        json_path = os.path.join(self.conf_dir(version), '_build', 'json')
-        return json_path
-
-    def full_singlehtml_path(self, version=LATEST):
-        """The path to the build singlehtml docs in the project."""
-        return os.path.join(self.conf_dir(version), '_build', 'singlehtml')
-
-    def rtd_build_path(self, version=LATEST):
-        """The destination path where the built docs are copied."""
-        return os.path.join(self.doc_path, 'rtd-builds', version)
-
-    def static_metadata_path(self):
-        """The path to the static metadata JSON settings file."""
-        return os.path.join(self.doc_path, 'metadata.json')
 
     def conf_file(self, version=LATEST):
         """Find a ``conf.py`` file in the project checkout."""
@@ -1305,6 +1290,10 @@ class Project(models.Model):
         )
         return queryset
 
+    @property
+    def organization(self):
+        return self.organizations.first()
+
 
 class APIProject(Project):
 
@@ -1623,7 +1612,7 @@ class WebHook(Notification):
         return f'{self.project.slug} {self.url}'
 
 
-class Domain(TimeStampedModel, models.Model):
+class Domain(TimeStampedModel):
 
     """A custom domain name for a project."""
 
@@ -1680,6 +1669,18 @@ class Domain(TimeStampedModel, models.Model):
         null=True,
         blank=True,
     )
+    skip_validation = models.BooleanField(
+        _("Skip validation process."),
+        default=False,
+        # TODO: remove after deploy.
+        null=True,
+    )
+    validation_process_start = models.DateTimeField(
+        _("Start date of the validation process."),
+        auto_now_add=True,
+        # TODO: remove after deploy.
+        null=True,
+    )
 
     # Strict-Transport-Security header options
     # These are not exposed to users because it's easy to misconfigure things
@@ -1697,7 +1698,7 @@ class Domain(TimeStampedModel, models.Model):
         help_text=_('If hsts_max_age > 0, set the preload flag with the HSTS header')
     )
 
-    objects = RelatedProjectQuerySet.as_manager()
+    objects = DomainQueryset.as_manager()
 
     class Meta:
         ordering = ('-canonical', '-machine', 'domain')
@@ -1707,6 +1708,26 @@ class Domain(TimeStampedModel, models.Model):
             domain=self.domain,
             project=self.project.name,
         )
+
+    @property
+    def is_valid(self):
+        return self.ssl_status == constants.SSL_STATUS_VALID
+
+    @property
+    def validation_process_expiration_date(self):
+        return self.validation_process_start.date() + timezone.timedelta(
+            days=settings.RTD_CUSTOM_DOMAINS_VALIDATION_PERIOD
+        )
+
+    @property
+    def validation_process_expired(self):
+        return timezone.now().date() >= self.validation_process_expiration_date
+
+    def restart_validation_process(self):
+        """Restart the validation process if it has expired."""
+        if not self.is_valid and self.validation_process_expired:
+            self.validation_process_start = timezone.now()
+            self.save()
 
     def save(self, *args, **kwargs):  # pylint: disable=arguments-differ
         parsed = urlparse(self.domain)
@@ -1793,6 +1814,7 @@ class Feature(models.Model):
     RECORD_404_PAGE_VIEWS = "record_404_page_views"
     ALLOW_FORCED_REDIRECTS = "allow_forced_redirects"
     DISABLE_PAGEVIEWS = "disable_pageviews"
+    DISABLE_SPHINX_DOMAINS = "disable_sphinx_domains"
 
     # Versions sync related features
     SKIP_SYNC_TAGS = 'skip_sync_tags'
@@ -1814,12 +1836,12 @@ class Feature(models.Model):
     DEFAULT_TO_FUZZY_SEARCH = 'default_to_fuzzy_search'
     INDEX_FROM_HTML_FILES = 'index_from_html_files'
 
-    LIST_PACKAGES_INSTALLED_ENV = 'list_packages_installed_env'
-    VCS_REMOTE_LISTING = 'vcs_remote_listing'
-    SPHINX_PARALLEL = 'sphinx_parallel'
-    USE_SPHINX_BUILDERS = 'use_sphinx_builders'
-    DEDUPLICATE_BUILDS = 'deduplicate_builds'
-    DONT_CREATE_INDEX = 'dont_create_index'
+    LIST_PACKAGES_INSTALLED_ENV = "list_packages_installed_env"
+    VCS_REMOTE_LISTING = "vcs_remote_listing"
+    SPHINX_PARALLEL = "sphinx_parallel"
+    USE_SPHINX_BUILDERS = "use_sphinx_builders"
+    CANCEL_OLD_BUILDS = "cancel_old_builds"
+    DONT_CREATE_INDEX = "dont_create_index"
 
     FEATURES = (
         (ALLOW_DEPRECATED_WEBHOOKS, _('Allow deprecated webhook views')),
@@ -1892,6 +1914,10 @@ class Feature(models.Model):
             DISABLE_PAGEVIEWS,
             _("Disable all page views"),
         ),
+        (
+            DISABLE_SPHINX_DOMAINS,
+            _("Disable indexing of sphinx domains"),
+        ),
 
         # Versions sync related features
         (
@@ -1963,8 +1989,10 @@ class Feature(models.Model):
             _('Use regular sphinx builders instead of custom RTD builders'),
         ),
         (
-            DEDUPLICATE_BUILDS,
-            _('Mark duplicated builds as NOOP to be skipped by builders'),
+            CANCEL_OLD_BUILDS,
+            _(
+                "Cancel triggered/running builds when a new one with same project/version arrives"
+            ),
         ),
         (
             DONT_CREATE_INDEX,
