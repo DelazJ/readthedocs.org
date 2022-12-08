@@ -26,11 +26,14 @@ jobs:
     docker:
       - image: 'cimg/python:3.10'
     steps:
-      - checkout
-      - run: git submodule sync
-      - run: git submodule update --init
-      - run: pip install --user 'tox<4'
-      - run: tox -c tox.embedapi.ini
+      - when:
+          condition: build-code
+          steps:
+            - checkout
+            - run: git submodule sync
+            - run: git submodule update --init
+            - run: pip install --user 'tox<4'
+            - run: tox -c tox.embedapi.ini
 
   checks:
     docker:
@@ -44,8 +47,8 @@ jobs:
       - run: git fetch origin main  # needed for comparisson in pre-commit
       - run: git branch --track main origin/main  # needed for comparisson in pre-commit
       - run: pip install --user 'tox<5'
-      - run: tox -e pre-commit
       - run: tox -e migrations
+      - run: tox -e pre-commit
       - run: tox -e lint
       - run: tox -e docs
       - run: tox -e docs-dev
