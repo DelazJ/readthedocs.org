@@ -29,7 +29,7 @@ class SendBuildStatusTests(TestCase):
             self.external_build.id,
             self.external_build.commit,
             BUILD_STATUS_SUCCESS,
-            link_to_build=True,
+            link_to_build=False,
         )
 
     @patch('readthedocs.projects.tasks.utils.send_build_status')
