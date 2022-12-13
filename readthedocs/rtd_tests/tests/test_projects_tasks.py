@@ -28,7 +28,8 @@ class SendBuildStatusTests(TestCase):
         send_build_status.delay.assert_called_once_with(
             self.external_build.id,
             self.external_build.commit,
-            BUILD_STATUS_SUCCESS
+            BUILD_STATUS_SUCCESS,
+            link_to_build=True,
         )
 
     @patch('readthedocs.projects.tasks.utils.send_build_status')

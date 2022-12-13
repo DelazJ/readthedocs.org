@@ -501,6 +501,7 @@ class TestBuildTask(BuildEnvironmentBase):
             build_pk=self.build.pk,
             commit=self.build.commit,
             status=BUILD_STATUS_FAILURE,
+            link_to_build=True,
         )
 
         build_complete.send.assert_called_once_with(
