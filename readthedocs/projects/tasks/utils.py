@@ -134,7 +134,9 @@ def finish_inactive_builds():
     )
 
 
-def send_external_build_status(version_type, build_pk, commit, status):
+def send_external_build_status(
+    version_type, build_pk, commit, status, link_to_build=False
+):
     """
     Check if build is external and Send Build Status for project external versions.
 
@@ -147,7 +149,7 @@ def send_external_build_status(version_type, build_pk, commit, status):
     # Send status reports for only External (pull/merge request) Versions.
     if version_type == EXTERNAL:
         # call the task that actually send the build status.
-        send_build_status.delay(build_pk, commit, status)
+        send_build_status.delay(build_pk, commit, status, link_to_build=link_to_build)
 
 
 class BuildRequest(Request):
