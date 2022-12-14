@@ -17,4 +17,3 @@ workflows:
             pytest.* build-code true
             tox.* build-code true
             package.* build-code true
-            docs/.* build-docs true
